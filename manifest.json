@@ -1,13 +1,12 @@
-{
-  "name": "Fiona Audio",
-  "description": "Full Fiona Audio for Kettu/Revenge - Fiona worklet engine (gain, distortion, EQ, voice, reverb, presets) with 0-90 volume slider. High gain/distortion up to 90.",
-
-  "authors": [
-    {
-      "name": "InputBoost",
-      "id": "0"
-    }
-  ],
-  "main": "index.js",
-  "hash": "278a0a67d45b9dae72e19e8fbb8129796188221d"
+﻿{
+    "name":  "Fiona Audio",
+    "description":  "Full Fiona Audio for Kettu/Revenge - Fiona worklet engine (gain, distortion, EQ, voice, reverb, presets) with 0-90 volume slider. High gain/distortion up to 90.",
+    "authors":  [
+                    {
+                        "name":  "InputBoost",
+                        "id":  "0"
+                    }
+                ],
+    "main":  "index.js",
+    "hash": "12572BBBF4F8CE874CC46DE593496E48F10EEA89"
 }

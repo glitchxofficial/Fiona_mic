@@ -148,6 +148,7 @@
   function dbToGain(db) { return Math.pow(10, db / 20); }
 
   let nativeGUM = null; let gumPatched = false; let fionaNode = null; let fionaCtx = null;
+  let micInjects = 0; let fionaDest = null;
 
   const ensureContext = async () => {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -170,7 +171,7 @@
     syncFionaFromStore();
     const p = fionaNode.parameters; const t = fionaCtx.currentTime;
     const upd = {
-      gain: dbToGain(FionaParams.masterGain),
+      gain: cfg().gain * dbToGain(FionaParams.masterGain),
       boost: dbToGain(FionaParams.inputBoost * 0.2),
       width: FionaParams.width / 100,
       pitch: Math.pow(2, (FionaParams.pitch - 50) / 25),
@@ -196,6 +197,11 @@
       if (md._fionaPatched) return true;
       nativeGUM = md.getUserMedia.bind(md);
       md.getUserMedia = async (constraints) => {
+        const enabled = cfg().enabled;
+        if (!enabled) {
+          // Stop mode: return the raw mic completely untouched = speak normally.
+          return nativeGUM(constraints);
+        }
         if (constraints?.audio) constraints.audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
         const stream = await nativeGUM(constraints);
         if (!constraints?.audio || !cfg().enabled) return stream;
@@ -204,10 +210,12 @@
           if (!ctx) return stream;
           const source = ctx.createMediaStreamSource(stream);
           const dest = ctx.createMediaStreamDestination();
+          fionaDest = dest;
           fionaNode = new AudioWorkletNode(ctx, 'fiona-engine');
           source.connect(fionaNode); fionaNode.connect(dest);
           syncFionaFromStore(); updateFionaNode();
           logger.info("fiona injected stream, gain " + cfg().slider);
+          micInjects = (micInjects || 0) + 1;
           return dest.stream;
         } catch (e) { logger.info("fiona inject failed " + e); return stream; }
       };
@@ -219,31 +227,63 @@
 
   let patches = []; let fluxUnsub = null; const saveOrig = []; let voiceRetry = null;
 
-  // Bridge to the non-root Fiona Floating app: it serves slider values on
-  // localhost, the plugin polls and applies them live. No root needed.
-  let bridgeTimer = null; let bridgeOk = false;
+  // Bridge to the full-feature Fiona app: it serves EVERY parameter + the
+  // soundboard on localhost, the plugin polls and applies them live.
+  let bridgeTimer = null; let bridgeOk = false; let lastPlayNow = "";
   const BRIDGE_URL = "http://127.0.0.1:19456/fiona";
+  const BRIDGE_INTS = ["gain","masterGain","inputBoost","width","pitch","formant","distortion","reverb","eqBass","eqMid","eqTreble","gateThreshold","noiseReduction","vadThreshold","duckingReduction","bitrate"];
+  const BRIDGE_BOOLS = ["enabled","clear","safe","raw","stereo","sidetone","speakSounds","vadEnabled","duckingEnabled"];
+  const BRIDGE_STRS = ["voiceChanger","voiceProfile","reverbType"];
   const pollBridge = () => {
     try {
       fetch(BRIDGE_URL).then((r) => r.json()).then((j) => {
         if (!j || typeof j.gain !== "number") return;
-        const g = Math.max(0, Math.min(90, Math.round(j.gain)));
         let changed = false;
-        if (store.gain !== g) { store.gain = g; changed = true; }
-        if (typeof j.clear === "boolean" && store.clear !== j.clear) { store.clear = j.clear; changed = true; }
-        if (typeof j.enabled === "boolean" && store.enabled !== j.enabled) { store.enabled = j.enabled; changed = true; }
-        if (!bridgeOk) { bridgeOk = true; logger.info("Fiona app bridge connected"); }
+        for (const k of BRIDGE_INTS) {
+          if (typeof j[k] === "number" && isFinite(j[k]) && store[k] !== Math.round(j[k])) { store[k] = Math.round(j[k]); changed = true; }
+        }
+        for (const k of BRIDGE_BOOLS) {
+          if (typeof j[k] === "boolean" && store[k] !== j[k]) { store[k] = j[k]; changed = true; }
+        }
+        for (const k of BRIDGE_STRS) {
+          if (typeof j[k] === "string" && j[k] && store[k] !== j[k]) { store[k] = j[k]; changed = true; }
+        }
+        if (Array.isArray(j.sounds) && JSON.stringify(j.sounds) !== JSON.stringify(store.sounds || [])) { store.sounds = j.sounds; changed = true; }
+        if (!bridgeOk) { bridgeOk = true; logger.info("Fiona app bridge connected — " + BRIDGE_INTS.length + "+ params"); }
         if (changed) { syncFionaFromStore(); updateFionaNode(); }
+        if (typeof j.playNow === "string" && j.playNow) {
+          if (lastPlayNow !== j.playNow) { lastPlayNow = j.playNow; playSound(j.playNow); }
+        }
+        sendHeartbeat();
       }).catch(() => { if (bridgeOk) { bridgeOk = false; logger.info("Fiona app bridge lost"); } });
     } catch {}
   };
-  const startBridge = () => { if (bridgeTimer) return; try { bridgeTimer = setInterval(pollBridge, 2000); pollBridge(); } catch {} };
+  // report live status back to the Fiona app so its UI shows "plugin connected / gain / mic injects"
+  const sendHeartbeat = () => {
+    try {
+      fetch("http://127.0.0.1:19456/heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          t: Date.now(),
+          gain: Number(store.gain || 0),
+          enabled: !!cfg().enabled,
+          patched: !!gumPatched,
+          node: !!fionaNode,
+          injects: Number(micInjects || 0),
+          sim: Number(store.voiceProfile === "sim" ? 1 : 0)
+        })
+      }).catch(() => {});
+    } catch {}
+  };
+  const startBridge = () => { if (bridgeTimer) return; try { bridgeTimer = setInterval(pollBridge, 400); pollBridge(); } catch {} };
   const stopBridge = () => { if (bridgeTimer) { try { clearInterval(bridgeTimer); } catch {} bridgeTimer = null; } bridgeOk = false; };
 
   // playback for the soundboard: tries the client's audio module, else degrades
   let speakUnsub = null; let lastSpeakAt = 0;
   const playSound = (url) => {
     if (!url) return false;
+    if (url.startsWith("/")) { playDeviceAudio(url); return true; }
     try {
       const mod = (() => {
         try { const m = findByProps("TonePlayer", "SoundManager"); if (m) return m; } catch {}
@@ -259,6 +299,25 @@
       return false;
     } catch { return false; }
   };
+  // Play a sound served by the Fiona app straight into the outgoing mic stream.
+  const playDeviceAudio = async (url) => {
+    try {
+      const ctx = await ensureContext();
+      if (!ctx || !fionaDest) return false;
+      const res = await fetch("http://127.0.0.1:19456" + url);
+      if (!res.ok) return false;
+      const buf = await res.arrayBuffer();
+      const audioBuf = await ctx.decodeAudioData(buf);
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(fionaNode);            // through the boost/EQ engine
+      fionaNode.connect(fionaDest);
+      src.start(0);
+      logger.info("device audio -> mic " + url);
+      return true;
+    } catch (e) { logger.info("device audio failed " + e); return false; }
+  };
+
   const myId = () => { try { const us = metro.findByName("UserStore"); return us?.getCurrentUser?.()?.id ?? us?.getCurrentUser?.()?.userId ?? null; } catch { return null; } };
   const fireSpeakSounds = () => {
     try {
