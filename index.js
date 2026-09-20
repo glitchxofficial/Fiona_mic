@@ -210,6 +210,27 @@
 
   let patches = []; let fluxUnsub = null; const saveOrig = []; let voiceRetry = null;
 
+  // Bridge to the non-root Fiona Floating app: it serves slider values on
+  // localhost, the plugin polls and applies them live. No root needed.
+  let bridgeTimer = null; let bridgeOk = false;
+  const BRIDGE_URL = "http://127.0.0.1:19456/fiona";
+  const pollBridge = () => {
+    try {
+      fetch(BRIDGE_URL).then((r) => r.json()).then((j) => {
+        if (!j || typeof j.gain !== "number") return;
+        const g = Math.max(0, Math.min(90, Math.round(j.gain)));
+        let changed = false;
+        if (store.gain !== g) { store.gain = g; changed = true; }
+        if (typeof j.clear === "boolean" && store.clear !== j.clear) { store.clear = j.clear; changed = true; }
+        if (typeof j.enabled === "boolean" && store.enabled !== j.enabled) { store.enabled = j.enabled; changed = true; }
+        if (!bridgeOk) { bridgeOk = true; logger.info("Fiona app bridge connected"); }
+        if (changed) { syncFionaFromStore(); updateFionaNode(); }
+      }).catch(() => { if (bridgeOk) { bridgeOk = false; logger.info("Fiona app bridge lost"); } });
+    } catch {}
+  };
+  const startBridge = () => { if (bridgeTimer) return; try { bridgeTimer = setInterval(pollBridge, 2000); pollBridge(); } catch {} };
+  const stopBridge = () => { if (bridgeTimer) { try { clearInterval(bridgeTimer); } catch {} bridgeTimer = null; } bridgeOk = false; };
+
   const applyOptions = (options) => {
     if (!options) return options;
     if (options.encodingVoiceBitRate != null) options.encodingVoiceBitRate = cfg().bitrate;
@@ -418,6 +439,7 @@
     onLoad() {
       try { logger.info("Fiona Audio plugin starting"); } catch {}
       try { patchGetUserMedia(); } catch (e) { try { logger.info("gum failed " + e); } catch {} }
+      try { startBridge(); } catch (e) { try { logger.info("bridge start failed " + e); } catch {} }
       try { hookTransport(); } catch (e) { try { logger.info("transport failed " + e); } catch {} }
       try { hookFlux(); } catch (e) { try { logger.info("flux failed " + e); } catch {} }
       try { patchMicSettings(); } catch (e) { try { logger.info("mic patch failed " + e); } catch {} }
@@ -430,6 +452,7 @@
       for (const u of patches) try { u(); } catch {}
       patches = []; if (voiceRetry) { try { clearInterval(voiceRetry); } catch {} voiceRetry = null; }
       if (floatingRetry) { try { clearInterval(floatingRetry); } catch {} floatingRetry = null; }
+      try { stopBridge(); } catch {}
       if (fluxUnsub) try { fluxUnsub(); } catch {} fluxUnsub = null;
       for (const r of saveOrig) try { r(); } catch {} saveOrig.length = 0;
       if (gumPatched && nativeGUM) { try { const nav = (typeof navigator !== 'undefined' ? navigator : null) ?? window?.navigator ?? global?.navigator ?? null; if (nav?.mediaDevices) nav.mediaDevices.getUserMedia = nativeGUM; } catch {} nativeGUM = null; gumPatched = false; }
