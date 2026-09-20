@@ -268,20 +268,23 @@
     voiceRetry = setInterval(() => { if (tryPatch() || ++attempts > 15) { clearInterval(voiceRetry); voiceRetry = null; } }, 1000);
   };
 
+  let floatingRetry = null;
   const createFloating = () => {
+    const tryPatch = () => {
     try {
       const RN = metro.common?.ReactNative;
-      if (!RN || !React) return false;
+      if (!RN || !React || !React.useState || !React.useReducer) return false;
       const E = React.createElement;
       const { View, Text, TouchableOpacity } = RN;
+      if (!View || !Text || !TouchableOpacity) { logger.info("floating: RN components missing"); return false; }
       let AppMod = null;
-      const tryNames = ["App", "DiscordApp", "Root", "AppRoot", "Main", "Application", "NavigationContainer", "Stack", "BottomTabBar"];
+      const tryNames = ["App", "DiscordApp", "Root", "AppRoot", "Main", "Application", "NavigationContainer", "Stack", "BottomTabBar", "MobileApp", "AppNavigator", "RootNavigator", "TabBar", "Home", "Chat", "Channel"];
       for (const n of tryNames) {
-        try { const m = metro.findByName(n, false); if (m && m.default) { AppMod = m; break; } } catch {}
-        try { const m = metro.findByDisplayName(n); if (m && m.default) { AppMod = m; break; } } catch {}
-        try { const m = metro.findByDisplayName(n, false); if (m && m.default) { AppMod = m; break; } } catch {}
+        try { const m = metro.findByName(n, false); if (m && (typeof m.default === "function" || typeof m === "function")) { AppMod = m.default ? m : { default: m }; break; } } catch {}
+        try { const m = metro.findByDisplayName(n); if (m && (typeof m.default === "function" || typeof m === "function")) { AppMod = m.default ? m : { default: m }; break; } } catch {}
+        try { const m = metro.findByDisplayName(n, false); if (m && (typeof m.default === "function" || typeof m === "function")) { AppMod = m.default ? m : { default: m }; break; } } catch {}
       }
-      if (!AppMod) try { AppMod = findByProps("App"); } catch {}
+      if (!AppMod) try { const m = findByProps("App"); if (m) AppMod = m; } catch {}
       if (!AppMod) {
         try {
           const mods = vendetta.metro.modules ?? {};
@@ -294,7 +297,7 @@
           }
         } catch {}
       }
-      if (!AppMod || typeof AppMod.default !== "function") { logger.info("floating: App not found"); return false; }
+      if (!AppMod || typeof AppMod.default !== "function") { logger.info("floating: App not found, will retry"); return false; }
       const Floating = () => {
         const [, forceUpdate] = React.useReducer((x) => x + 1, 0);
         const slider = cfg().slider;
@@ -314,12 +317,28 @@
           ) : null
         );
       };
-      const undo = patcher.after("default", AppMod, (args, ret) => {
-        try { return E(View, { style: { flex: 1 }, pointerEvents: "box-none" }, ret, E(Floating, null)); } catch { return ret; }
-      });
+      let undo = null;
+      try {
+        undo = patcher.after("default", AppMod, (args, ret) => {
+          try {
+            if (!ret) return ret;
+            return E(View, { style: { flex: 1 }, pointerEvents: "box-none" }, ret, E(Floating, null));
+          } catch { return ret; }
+        });
+      } catch (e) { logger.info("floating patch threw " + e); return false; }
       if (undo) { patches.push(undo); logger.info("floating Fiona injected"); return true; }
-    } catch (e) { logger.info("floating failed " + e); }
-    return false;
+      logger.info("floating: patch returned nothing, will retry");
+      return false;
+    } catch (e) { logger.info("floating failed " + e); return false; }
+    };
+    if (tryPatch()) return true;
+    // App module loads lazily — retry for 30s so floating appears even if enabled before first render
+    let attempts = 0;
+    if (floatingRetry) try { clearInterval(floatingRetry); } catch {}
+    floatingRetry = setInterval(() => {
+      if (tryPatch() || ++attempts > 30) { try { clearInterval(floatingRetry); } catch {} floatingRetry = null; if (attempts > 30) logger.info("floating: App not found after retries"); }
+    }, 1000);
+    return true;
   };
 
   const buildSettings = () => {
@@ -410,6 +429,7 @@
     onUnload() {
       for (const u of patches) try { u(); } catch {}
       patches = []; if (voiceRetry) { try { clearInterval(voiceRetry); } catch {} voiceRetry = null; }
+      if (floatingRetry) { try { clearInterval(floatingRetry); } catch {} floatingRetry = null; }
       if (fluxUnsub) try { fluxUnsub(); } catch {} fluxUnsub = null;
       for (const r of saveOrig) try { r(); } catch {} saveOrig.length = 0;
       if (gumPatched && nativeGUM) { try { const nav = (typeof navigator !== 'undefined' ? navigator : null) ?? window?.navigator ?? global?.navigator ?? null; if (nav?.mediaDevices) nav.mediaDevices.getUserMedia = nativeGUM; } catch {} nativeGUM = null; gumPatched = false; }
